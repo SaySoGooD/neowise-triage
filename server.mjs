@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { classify } from "./mock-ai.mjs";
-import { triage, isValidText, MODEL_TIMEOUT_MS } from "./triage.mjs";
+import { triage, isValidText, MODEL_TIMEOUT_MS, TriageCancelled } from "./triage.mjs";
 
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -72,8 +72,20 @@ async function handleTriage(request, response, { classifyFn, timeoutMs, log }) {
     log({ event: "triage_invalid_input", reason: error.message });
     return sendJson(response, 400, { status: "invalid_input" });
   }
+  const clientGone = new AbortController();
+  response.on("close", () => {
+    if (!response.writableFinished) clientGone.abort();
+  });
   const started = Date.now();
-  const { response: result, reason } = await triage(text, { classifyFn, timeoutMs });
+  let outcome;
+  try {
+    outcome = await triage(text, { classifyFn, timeoutMs, signal: clientGone.signal });
+  } catch (error) {
+    if (!(error instanceof TriageCancelled)) throw error;
+    log({ event: "triage_cancelled", durationMs: Date.now() - started });
+    return;
+  }
+  const { response: result, reason } = outcome;
   log({ event: "triage_done", status: result.status, reason, durationMs: Date.now() - started, textLength: text.length });
   sendJson(response, 200, result);
 }

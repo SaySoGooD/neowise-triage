@@ -12,24 +12,33 @@ export const FailureReason = Object.freeze({
 });
 
 class ModelTimeout extends Error {}
+export class TriageCancelled extends Error {}
 
 export function isValidText(text) {
   return typeof text === "string" && text.trim() !== "";
 }
 
-async function callModelWithTimeout(text, classifyFn, timeoutMs) {
+async function callModelWithTimeout(text, classifyFn, timeoutMs, cancelSignal) {
   const controller = new AbortController();
   let timer;
-  const timeout = new Promise((_, reject) => {
+  let onCancel;
+  const stop = new Promise((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
       reject(new ModelTimeout());
     }, timeoutMs);
+    onCancel = () => {
+      controller.abort();
+      reject(new TriageCancelled());
+    };
+    if (cancelSignal?.aborted) onCancel();
+    cancelSignal?.addEventListener("abort", onCancel, { once: true });
   });
   try {
-    return await Promise.race([classifyFn(text, { signal: controller.signal }), timeout]);
+    return await Promise.race([classifyFn(text, { signal: controller.signal }), stop]);
   } finally {
     clearTimeout(timer);
+    cancelSignal?.removeEventListener("abort", onCancel);
   }
 }
 
@@ -50,11 +59,12 @@ function manualReview(reason) {
   return { response: { status: "manual_review", topic: null, draft: null }, reason };
 }
 
-export async function triage(text, { classifyFn = classify, timeoutMs = MODEL_TIMEOUT_MS } = {}) {
+export async function triage(text, { classifyFn = classify, timeoutMs = MODEL_TIMEOUT_MS, signal } = {}) {
   let raw;
   try {
-    raw = await callModelWithTimeout(text, classifyFn, timeoutMs);
+    raw = await callModelWithTimeout(text, classifyFn, timeoutMs, signal);
   } catch (error) {
+    if (error instanceof TriageCancelled) throw error;
     return manualReview(error instanceof ModelTimeout ? FailureReason.TIMEOUT : FailureReason.MODEL_ERROR);
   }
   const parsed = parseModelOutput(raw);

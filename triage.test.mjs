@@ -124,3 +124,33 @@ test("таймаут держится, даже если модель игнор
     await new Promise((resolve) => slow.close(resolve));
   }
 });
+
+test("клиент отменил запрос: вызов модели тоже отменяется", async () => {
+  const cancelLogs = [];
+  let modelAborted;
+  const modelStopped = new Promise((resolve) => { modelAborted = resolve; });
+  const app = createApp({
+    classifyFn: (_text, { signal }) => new Promise(() => {
+      signal.addEventListener("abort", () => modelAborted(true), { once: true });
+    }),
+    timeoutMs: 5_000,
+    log: (entry) => cancelLogs.push(entry),
+  });
+  await new Promise((resolve) => app.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = new AbortController();
+    const pending = fetch(`http://127.0.0.1:${app.address().port}/api/triage`, {
+      method: "POST",
+      body: JSON.stringify({ text: "Привет" }),
+      signal: client.signal,
+    }).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    client.abort();
+    await pending;
+    assert.equal(await modelStopped, true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(cancelLogs.some((e) => e.event === "triage_cancelled"));
+  } finally {
+    await new Promise((resolve) => app.close(resolve));
+  }
+});
