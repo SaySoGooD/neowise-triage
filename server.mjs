@@ -123,9 +123,15 @@ async function loadPages() {
   };
 }
 
+export function modelTimeoutFromEnv(value) {
+  const ms = Number(value);
+  return Number.isInteger(ms) && ms > 0 ? ms : MODEL_TIMEOUT_MS;
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const port = Number(process.env.PORT || 3000);
-  createApp({ pages: await loadPages() }).listen(port, "127.0.0.1", () => {
-    console.log(`http://127.0.0.1:${port}`);
+  const timeoutMs = modelTimeoutFromEnv(process.env.MODEL_TIMEOUT_MS);
+  createApp({ pages: await loadPages(), timeoutMs }).listen(port, "127.0.0.1", () => {
+    console.log(`http://127.0.0.1:${port} (model timeout ${timeoutMs} ms)`);
   });
 }

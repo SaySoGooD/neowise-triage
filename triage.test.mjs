@@ -1,6 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { createApp } from "./server.mjs";
+import { createApp, modelTimeoutFromEnv } from "./server.mjs";
 import { parseModelOutput, triage, FailureReason, MODEL_TIMEOUT_MS } from "./triage.mjs";
 
 function withLimit(promise, message, ms = 2_000) {
@@ -210,4 +210,11 @@ test("DNS rebinding: чужой Host отклоняется", async () => {
     req.end(JSON.stringify({ text: "Цена?" }));
   });
   assert.equal(status, 421);
+});
+
+test("MODEL_TIMEOUT_MS: корректное значение применяется, иначе 300 мс", () => {
+  assert.equal(modelTimeoutFromEnv("8000"), 8000);
+  for (const bad of [undefined, "", "0", "-5", "abc", "1.5"]) {
+    assert.equal(modelTimeoutFromEnv(bad), MODEL_TIMEOUT_MS, String(bad));
+  }
 });
