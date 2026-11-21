@@ -24,12 +24,12 @@ async function callModelWithTimeout(text, classifyFn, timeoutMs, cancelSignal) {
   let onCancel;
   const stop = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
       reject(new ModelTimeout());
+      controller.abort();
     }, timeoutMs);
     onCancel = () => {
-      controller.abort();
       reject(new TriageCancelled());
+      controller.abort();
     };
     if (cancelSignal?.aborted) onCancel();
     cancelSignal?.addEventListener("abort", onCancel, { once: true });

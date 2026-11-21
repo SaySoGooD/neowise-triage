@@ -3,7 +3,9 @@ const MESSAGES = {
   empty: "Введите текст заявки.",
   loading: "Разбираем заявку…",
   manual: "AI не справился с этой заявкой. Выберите тему и напишите ответ сами.",
+  unavailable: "Сервис разбора сейчас недоступен. Попробуйте ещё раз или разберите заявку вручную.",
   copied: "Ответ скопирован.",
+  copyFailed: "Не удалось скопировать, выделите текст вручную.",
 };
 
 const form = document.querySelector("form");
@@ -52,13 +54,24 @@ function copyButton(source, status) {
   button.type = "button";
   button.addEventListener("click", async () => {
     if (source.value.trim() === "") return;
-    await navigator.clipboard.writeText(source.value);
-    status.textContent = MESSAGES.copied;
+    try {
+      await navigator.clipboard.writeText(source.value);
+      status.textContent = MESSAGES.copied;
+    } catch {
+      status.textContent = MESSAGES.copyFailed;
+    }
   });
   return button;
 }
 
-function renderManualReview() {
+function retryButton() {
+  const button = element("button", "Повторить");
+  button.type = "button";
+  button.addEventListener("click", () => form.requestSubmit());
+  return button;
+}
+
+function renderManualReview(message = MESSAGES.manual, extra = []) {
   const select = topicSelect();
   const answer = element("textarea");
   answer.id = "manual-answer";
@@ -70,7 +83,8 @@ function renderManualReview() {
   const answerLabel = element("label", "Ответ");
   answerLabel.htmlFor = answer.id;
   render(
-    element("p", MESSAGES.manual, "notice"),
+    element("p", message, "notice"),
+    ...extra,
     topicLabel, select,
     answerLabel, answer,
     copyButton(answer, status), status,
@@ -85,17 +99,19 @@ async function requestTriage(text, signal) {
       body: JSON.stringify({ text }),
       signal,
     });
+    if (!reply.ok && reply.status !== 400) return { status: "unavailable" };
     return await reply.json();
   } catch (error) {
     if (error.name === "AbortError") return null;
-    return { status: "manual_review" };
+    return { status: "unavailable" };
   }
 }
 
 function renderResult(data) {
   if (data.status === "ready") return renderReady(data);
   if (data.status === "invalid_input") return renderNotice(MESSAGES.empty, "error");
-  renderManualReview();
+  if (data.status === "manual_review") return renderManualReview();
+  renderManualReview(MESSAGES.unavailable, [retryButton()]);
 }
 
 form.addEventListener("submit", async (event) => {

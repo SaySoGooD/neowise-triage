@@ -1,7 +1,18 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createApp } from "./server.mjs";
-import { parseModelOutput, FailureReason } from "./triage.mjs";
+import { parseModelOutput, triage, FailureReason, MODEL_TIMEOUT_MS } from "./triage.mjs";
+
+function withLimit(promise, message, ms = 2_000) {
+  let timer;
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer));
+}
+
+async function waitFor(check) {
+  while (!check()) await new Promise((resolve) => setTimeout(resolve, 5));
+  return true;
+}
 
 let server;
 let baseUrl;
@@ -68,7 +79,7 @@ test("таймаут модели: ответ manual_review не позже ~300
   const elapsed = Date.now() - started;
   assert.equal(reply.status, 200);
   assert.deepEqual(reply.body, MANUAL);
-  assert.ok(elapsed < 800, `ждали ${elapsed} мс, имитатор отвечает за 1200 мс`);
+  assert.ok(elapsed < 600, `ждали ${elapsed} мс, имитатор отвечает за 1200 мс`);
 });
 
 test("проверка ответа AI называет причину сбоя", () => {
@@ -127,12 +138,16 @@ test("таймаут держится, даже если модель игнор
 
 test("клиент отменил запрос: вызов модели тоже отменяется", async () => {
   const cancelLogs = [];
-  let modelAborted;
-  const modelStopped = new Promise((resolve) => { modelAborted = resolve; });
+  let markStarted;
+  let markAborted;
+  const modelStarted = new Promise((resolve) => { markStarted = resolve; });
+  const modelAborted = new Promise((resolve) => { markAborted = resolve; });
   const app = createApp({
-    classifyFn: (_text, { signal }) => new Promise(() => {
-      signal.addEventListener("abort", () => modelAborted(true), { once: true });
-    }),
+    classifyFn: (_text, { signal }) => {
+      signal.addEventListener("abort", () => markAborted(true), { once: true });
+      markStarted();
+      return new Promise(() => {});
+    },
     timeoutMs: 5_000,
     log: (entry) => cancelLogs.push(entry),
   });
@@ -144,13 +159,55 @@ test("клиент отменил запрос: вызов модели тоже
       body: JSON.stringify({ text: "Привет" }),
       signal: client.signal,
     }).catch(() => {});
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await withLimit(modelStarted, "модель не была вызвана");
     client.abort();
     await pending;
-    assert.equal(await modelStopped, true);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.ok(cancelLogs.some((e) => e.event === "triage_cancelled"));
+    assert.equal(await withLimit(modelAborted, "вызов модели не отменён"), true);
+    await withLimit(waitFor(() => cancelLogs.some((e) => e.event === "triage_cancelled")), "нет записи triage_cancelled");
   } finally {
     await new Promise((resolve) => app.close(resolve));
   }
+});
+
+test("триаж ждёт модель ровно столько, сколько задано", async () => {
+  const started = Date.now();
+  const { response, reason } = await triage("Привет", { classifyFn: () => new Promise(() => {}), timeoutMs: MODEL_TIMEOUT_MS });
+  const elapsed = Date.now() - started;
+  assert.equal(MODEL_TIMEOUT_MS, 300);
+  assert.equal(response.status, "manual_review");
+  assert.equal(reason, FailureReason.TIMEOUT);
+  assert.ok(elapsed >= 290 && elapsed < 450, `ждали ${elapsed} мс`);
+});
+
+test("таймаут записывается как model_timeout, даже если модель сразу падает при отмене", async () => {
+  const classifyFn = (_text, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(new Error("AbortError")), { once: true });
+  });
+  const { reason } = await triage("Привет", { classifyFn, timeoutMs: 20 });
+  assert.equal(reason, FailureReason.TIMEOUT);
+});
+
+test("Origin с другим протоколом или портом отклоняется", async () => {
+  const port = new URL(baseUrl).port;
+  for (const origin of [`https://127.0.0.1:${port}`, `http://127.0.0.1:1`]) {
+    const reply = await fetch(`${baseUrl}/api/triage`, {
+      method: "POST",
+      headers: { Origin: origin },
+      body: JSON.stringify({ text: "Цена?" }),
+    });
+    assert.equal(reply.status, 403, origin);
+  }
+});
+
+test("DNS rebinding: чужой Host отклоняется", async () => {
+  const { request } = await import("node:http");
+  const status = await new Promise((resolve, reject) => {
+    const req = request(`${baseUrl}/api/triage`, { method: "POST", headers: { Host: "evil.example" } }, (res) => {
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on("error", reject);
+    req.end(JSON.stringify({ text: "Цена?" }));
+  });
+  assert.equal(status, 421);
 });

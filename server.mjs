@@ -26,14 +26,16 @@ function sendJson(response, status, body) {
   send(response, status, "application/json; charset=utf-8", JSON.stringify(body));
 }
 
+const LOCAL_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+function isTrustedHost(host = "") {
+  return LOCAL_HOSTNAMES.has(host.replace(/:\d+$/, ""));
+}
+
 function isForeignOrigin(request) {
   const origin = request.headers.origin;
   if (!origin) return false;
-  try {
-    return new URL(origin).host !== request.headers.host;
-  } catch {
-    return true;
-  }
+  return origin !== `http://${request.headers.host}`;
 }
 
 async function readBody(request) {
@@ -93,6 +95,10 @@ async function handleTriage(request, response, { classifyFn, timeoutMs, log }) {
 export function createApp({ classifyFn = classify, timeoutMs = MODEL_TIMEOUT_MS, pages = {}, log = defaultLogger } = {}) {
   const server = createServer(async (request, response) => {
     try {
+      if (!isTrustedHost(request.headers.host)) {
+        log({ event: "request_rejected", reason: "untrusted_host" });
+        return sendJson(response, 421, { status: "misdirected_request" });
+      }
       const page = request.method === "GET" ? pages[request.url] : undefined;
       if (page) return send(response, 200, page.type, page.body);
       if (request.method === "POST" && request.url === "/api/triage") {
